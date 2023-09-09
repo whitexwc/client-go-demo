@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,7 +22,7 @@ import (
 
 const (
 	workerNum = 5
-	maxRetry = 5 
+	maxRetry  = 5
 )
 
 type controller struct {
@@ -57,6 +58,7 @@ func (c *controller) processNextItem() bool {
 	if err != nil {
 		c.handlerError(key, err)
 	}
+	return true
 }
 
 func (c *controller) syncService(key string) error {
@@ -83,7 +85,7 @@ func (c *controller) syncService(key string) error {
 
 	if ok && errors.IsNotFound(err) {
 		// create ingress
-		ig := c.constructIngress(namespaceKey, name)
+		ig := c.constructIngress(service)
 		_, err = c.client.NetworkingV1().Ingresses(namespaceKey).Create(context.TODO(), ig, metav1.CreateOptions{})
 		if err != nil {
 			return err
@@ -95,15 +97,20 @@ func (c *controller) syncService(key string) error {
 			return err
 		}
 	}
-
+	return nil
 }
 
-func (c *controller) constructIngress(namespaceKey string, name string) *v1.Ingress {
+func (c *controller) constructIngress(service *corev1.Service) *v1.Ingress {
 	ingress := v1.Ingress{}
-	ingress.Name = name
-	ingress.Namespace = namespaceKey
+	ingress.ObjectMeta.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(service, corev1.SchemeGroupVersion.WithKind("Service")),
+	}
+	ingress.Name = service.Name
+	ingress.Namespace = service.Namespace
 	pathType := v1.PathTypePrefix
+	icn := "nginx"
 	ingress.Spec = v1.IngressSpec{
+		IngressClassName: &icn,
 		Rules: []v1.IngressRule{
 			{
 				Host: "example.com",
@@ -115,7 +122,7 @@ func (c *controller) constructIngress(namespaceKey string, name string) *v1.Ingr
 								PathType: &pathType,
 								Backend: v1.IngressBackend{
 									Service: &v1.IngressServiceBackend{
-										Name: name,
+										Name: service.Name,
 										Port: v1.ServiceBackendPort{
 											Number: 80,
 										},
@@ -134,8 +141,11 @@ func (c *controller) constructIngress(namespaceKey string, name string) *v1.Ingr
 }
 
 func (c *controller) handlerError(key string, err error) {
-	if c.queue.NumRequeues(key) > maxRe
-	c.queue.AddRateLimited(key)
+	if c.queue.NumRequeues(key) <= maxRetry {
+		c.queue.AddRateLimited(key)
+	}
+	runtime.HandleError(err)
+	c.queue.Forget(key)
 }
 
 func NewController(client kubernetes.Interface, serviceInformer informer.ServiceInformer, ingressInformer netInformer.IngressInformer) controller {
